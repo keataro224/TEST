@@ -1,0 +1,242 @@
+---
+title: "Regularized Linear Model"
+author: "Jeongwoo Hong"
+date: "2017년 11월 1일"
+output: html_document
+---
+
+
+### Regularized Linear Model:
+####step [1]
+```{r Step_1,warning=FALSE,message=FALSE}
+# get the require R packages
+library(ggplot2)
+library(plyr)
+library(dplyr)
+library(caret)
+library(moments)
+library(glmnet)
+library(elasticnet)
+library(knitr)
+
+options(width=100)
+knitr::opts_chunk$set(echo = TRUE, message=FALSE, warning=FALSE)
+
+```
+
+
+####Step [2]
+```{r Step_2}
+train <- read.csv(file.path("train.csv"),stringsAsFactors = FALSE)
+
+test <- read.csv(file.path("test.csv"),stringsAsFactors = FALSE)
+
+```
+
+####Step [3]
+```{r Step_3}
+# traing data의 상위 몇 줄을 관찰
+head(train)
+
+# dataset의 차원을 출력
+dim(head(train))
+```
+
+####Step [4]
+```{r Step_4}
+# preprocessing을 위해 dataset 결합
+all_data <- rbind(select(train,MSSubClass:SaleCondition),
+                  select(test,MSSubClass:SaleCondition))
+```
+
+
+
+### Data preprocessing:
+####Step [5]
+```{r Step_5,message=FALSE}
+
+par(mfrow=c(1, 2))
+
+# 히스토그램으로 목적 변수의 분포를 살표봅니다.
+hist(train$SalePrice, main = "SalePrice") ; 
+hist(log(train$SalePrice+1), main = "log(SalePrice+1)")
+```
+
+
+####Step [6]
+```{r Step_6}
+
+# 목적 변수에 로그를 취해 변형하여 외도(skewness)를 감소
+train$SalePrice <- log(train$SalePrice + 1)
+
+# 높은 외도를 가지고 있는 연속형 변수들에 log를 취해 변형
+# 각각의 변수의 데이터 타입 확인
+feature_classes <- sapply(all_data, class)
+numeric_feats <- names(feature_classes[feature_classes!= "character"])
+
+# 각 연속형 변수들의 외도 확인
+skewed_feats <- skewness(all_data[,numeric_feats], na.rm = TRUE)
+
+# 기준치 이상의 외도를 가진 변수 객체화
+skewed_feats <- skewed_feats[skewed_feats > 0.75]
+
+# log(x + 1)을 취해 변형
+for(x in names(skewed_feats)) {
+  all_data[[x]] <- log(all_data[[x]] + 1)
+}
+
+```
+
+
+####Step [7]
+```{r Step_7}
+
+# 범주형 변수 이름 객체화
+categorical_feats <- names(feature_classes[feature_classes == "character"])
+
+# caret의 dummyVars 함수를 사용해 hot one encoding
+dummies <- dummyVars(~.,all_data[categorical_feats])
+categorical_1_hot <- predict(dummies,all_data[categorical_feats])
+categorical_1_hot[is.na(categorical_1_hot)] <- 0  #NA 값을 0으로 대체
+
+```
+
+
+####Step [8]
+```{r Step_8}
+
+# 연송형 변수의 missing value를 평균 값으로 대체
+numeric_df <- all_data[numeric_feats]
+
+for (x in numeric_feats) {
+    mean_value <- mean(train[[x]],na.rm = TRUE)
+    all_data[[x]][is.na(all_data[[x]])] <- mean_value
+}
+
+```
+
+####In [9]
+```{r In_9}
+# all_data 변수를 전처리가 된 데이터로 재구성
+all_data <- cbind(all_data[numeric_feats],categorical_1_hot)
+
+# training data, testing data 생성
+X_train <- all_data[1:nrow(train),]
+X_test <- all_data[(nrow(train)+1):nrow(all_data),]
+y <- train$SalePrice
+
+```
+
+
+###Models
+####Step [10]
+```{r Step_10}
+
+# caret을 이용해 training parameter 설정
+CARET.TRAIN.CTRL <- trainControl(method="repeatedcv",
+                                 number=5,
+                                 repeats=5,
+                                 verboseIter=FALSE)
+```
+
+
+####Step [12]
+```{r Step_12}
+
+# Ridge regression model
+
+lambdas <- seq(1,0,-0.001)
+
+# train model
+set.seed(123)  # for reproducibility
+model_ridge <- train(x=X_train,y=y,
+                  method="glmnet",
+                  metric="RMSE",
+                  maximize=FALSE,
+                  trControl=CARET.TRAIN.CTRL,
+                  tuneGrid=expand.grid(alpha=0, # Ridge regression
+                                       lambda=lambdas))
+
+```
+
+####Step [13]
+```{r Step_13}
+ggplot(data=filter(model_ridge$result,RMSE<0.14)) +
+    geom_line(aes(x=lambda,y=RMSE))
+
+
+```
+
+
+####Step [14]
+```{r Step_14}
+mean(model_ridge$resample$RMSE)
+```
+
+
+####Step [15]
+```{r Step_15}
+# Lasso regression model
+
+# train model
+set.seed(123)  # for reproducibility
+model_lasso <- train(x=X_train,y=y,
+                  method="glmnet",
+                  metric="RMSE",
+                  maximize=FALSE,
+                  trControl=CARET.TRAIN.CTRL,
+                  tuneGrid=expand.grid(alpha=1,  # Lasso regression
+                                       lambda=c(1,0.1,0.05,0.01,seq(0.009,0.001,-0.001),
+                                            0.00075,0.0005,0.0001)))
+model_lasso
+```
+
+
+####Step [16]
+```{r Step_16}
+mean(model_lasso$resample$RMSE)
+```
+
+####Step [17]
+```{r Step_17}
+# coefficients 추출
+coef <- data.frame(coef.name = dimnames(coef(model_lasso$finalModel,s=model_lasso$bestTune$lambda))[[1]], 
+           coef.value = matrix(coef(model_lasso$finalModel,s=model_lasso$bestTune$lambda)))
+
+# Intercept 제외
+coef <- coef[-1,]
+```
+
+####Step [18]
+```{r Step_18}
+# summary of results
+picked_features <- nrow(filter(coef,coef.value!=0))
+not_picked_features <- nrow(filter(coef,coef.value==0))
+
+cat("Lasso picked",picked_features,"variables and eliminated the other",
+    not_picked_features,"variables\n")
+```
+
+
+####Step [19]
+```{r Step_19}
+# coefficient 오름차순 정렬
+coef <- arrange(coef,-coef.value)
+
+# top 10 & bottom 10 변수 추출
+imp_coef <- rbind(head(coef,10),
+                  tail(coef,10))
+```
+
+
+####Step [20]
+```{r Step_20}
+ggplot(imp_coef) +
+    geom_bar(aes(x=reorder(coef.name,coef.value),y=coef.value),
+             stat="identity") +
+    ylim(-1.5,0.6) +
+    coord_flip() +
+    ggtitle("Coefficents in the Lasso Model") +
+    theme(axis.title=element_blank())
+    
+```
